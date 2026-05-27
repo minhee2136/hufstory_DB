@@ -1,0 +1,18 @@
+# Claude
+CLAUDE.md
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# 생성 파일 (임베딩)
+faiss_index.bin
+faiss_meta.pkl

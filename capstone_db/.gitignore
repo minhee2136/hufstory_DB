@@ -1,0 +1,22 @@
+# DB 파일
+*.db
+*.sqlite
+*.sqlite3
+
+# CSV 데이터
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# OS
+.DS_Store
