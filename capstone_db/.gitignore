@@ -1,5 +1,4 @@
 # DB 파일
-*.db
 *.sqlite
 *.sqlite3
 

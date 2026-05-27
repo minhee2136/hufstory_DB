@@ -16,3 +16,6 @@ __pycache__/
 # 생성 파일 (임베딩)
 faiss_index.bin
 faiss_meta.pkl
+
+# 임베딩 중간 결과
+*.npy
