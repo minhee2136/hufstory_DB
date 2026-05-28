@@ -2,11 +2,12 @@
 서울 도슨트 시연 스크립트
 - 장소 검색 → 해설 조회 or 실시간 생성
 """
+import os
 import sqlite3
 from groq import Groq
 
 DB_PATH = "/Users/minhee/Desktop/DB/capstone_db/seoul_docent.db"
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MODEL = "llama-3.3-70b-versatile"
 
 THEMES = ["생활사", "독립운동", "지명유래", "시장", "인물"]

@@ -16,3 +16,9 @@ __pycache__/
 # 생성 파일 (임베딩)
 faiss_index.bin
 faiss_meta.pkl
+
+# DB 파일 (용량 초과)
+*.db
+*.db-shm
+*.db-wal
+*.db-x-embeddings-1-embedding.bin

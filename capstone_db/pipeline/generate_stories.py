@@ -2,13 +2,14 @@
 Phase 3 — 도슨트 해설 생성
 place + 모든 sources.raw_text → Groq API → stories 테이블 저장
 """
+import os
 import sqlite3
 import time
 import sys
 from groq import Groq
 
 DB_PATH = "/Users/minhee/Desktop/DB/capstone_db/seoul_docent.db"
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 MODEL = "llama-3.3-70b-versatile"
 
 # 주제별 프롬프트 힌트
