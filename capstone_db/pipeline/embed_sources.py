@@ -1,12 +1,14 @@
 """
-Phase 3.5 — sources 임베딩 생성
-sources.raw_text → sentence-transformers → DB embeddings 테이블 + FAISS 인덱스
+Phase 3.5 — places 임베딩 생성
+places.sources JSON → 텍스트 합치기 → sentence-transformers → places.embedding (BLOB)
++ FAISS 인덱스 생성
 
 모델: jhgan/ko-sroberta-multitask (한국어 특화)
       fallback: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
 """
 
 import sqlite3
+import json
 import numpy as np
 import pickle
 from pathlib import Path
@@ -16,30 +18,17 @@ DB_PATH = Path("/Users/minhee/Desktop/DB/capstone_db/seoul_docent.db")
 FAISS_INDEX_PATH = DB_PATH.parent / "faiss_index.bin"
 META_PATH = DB_PATH.parent / "faiss_meta.pkl"
 
-# 한국어 특화 모델 우선, 없으면 다국어 모델
 MODEL_NAME = "jhgan/ko-sroberta-multitask"
 FALLBACK_MODEL = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 
 BATCH_SIZE = 64
+MAX_TEXT_LEN = 1000  # 장소당 텍스트 최대 길이 (토큰 제한 대비)
 
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
-
-
-def ensure_embeddings_table(conn):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS embeddings (
-            source_id  INTEGER PRIMARY KEY,
-            place_id   TEXT NOT NULL,
-            model_name TEXT NOT NULL,
-            embedding  BLOB NOT NULL,
-            FOREIGN KEY (source_id) REFERENCES sources(source_id)
-        )
-    """)
-    conn.commit()
 
 
 def load_model():
@@ -55,33 +44,41 @@ def load_model():
         return model, FALLBACK_MODEL
 
 
-def fetch_unembedded_sources(conn, model_name):
-    """아직 임베딩되지 않은 소스만 가져옴"""
+def extract_text(name, sources_json):
+    """places.sources JSON에서 모든 출처 텍스트를 합쳐 반환"""
+    parts = [name or ""]
+    if sources_json:
+        try:
+            src = json.loads(sources_json)
+            for v in src.values():
+                if v and isinstance(v, str):
+                    parts.append(v[:MAX_TEXT_LEN])
+        except Exception:
+            pass
+    return " ".join(parts).strip()
+
+
+def fetch_unembedded(conn):
+    """임베딩이 없는 장소만 반환"""
     rows = conn.execute("""
-        SELECT s.source_id, s.place_id, s.raw_text
-        FROM sources s
-        LEFT JOIN embeddings e
-          ON s.source_id = e.source_id AND e.model_name = ?
-        WHERE e.source_id IS NULL
-          AND s.raw_text IS NOT NULL
-          AND TRIM(s.raw_text) != ''
-        ORDER BY s.source_id
-    """, (model_name,)).fetchall()
+        SELECT place_id, name, sources
+        FROM places
+        WHERE embedding IS NULL
+          AND (sources IS NOT NULL OR name IS NOT NULL)
+    """).fetchall()
     return rows
 
 
 def embed_and_save(conn, model, model_name, rows):
-    """배치 임베딩 후 DB 저장"""
     total = len(rows)
     if total == 0:
-        print("모든 소스가 이미 임베딩되어 있습니다.")
+        print("모든 장소가 이미 임베딩되어 있습니다.")
         return
 
     print(f"임베딩 대상: {total}건")
 
-    source_ids = [r[0] for r in rows]
-    place_ids  = [r[1] for r in rows]
-    texts      = [r[2] for r in rows]
+    place_ids = [r[0] for r in rows]
+    texts = [extract_text(r[1], r[2]) for r in rows]
 
     all_embeddings = []
     for i in tqdm(range(0, total, BATCH_SIZE), desc="임베딩 중"):
@@ -91,23 +88,22 @@ def embed_and_save(conn, model, model_name, rows):
 
     all_embeddings = np.vstack(all_embeddings).astype(np.float32)
 
-    # DB 저장
     print("DB 저장 중...")
     conn.executemany(
-        "INSERT OR REPLACE INTO embeddings (source_id, place_id, model_name, embedding) VALUES (?, ?, ?, ?)",
+        "UPDATE places SET embedding = ? WHERE place_id = ?",
         [
-            (source_ids[i], place_ids[i], model_name, all_embeddings[i].tobytes())
+            (all_embeddings[i].tobytes(), place_ids[i])
             for i in range(total)
         ]
     )
     conn.commit()
     print(f"DB 저장 완료: {total}건")
 
-    return all_embeddings, source_ids, place_ids
+    return all_embeddings, place_ids
 
 
-def build_faiss_index(conn, model_name):
-    """DB의 모든 임베딩으로 FAISS 인덱스 생성"""
+def build_faiss_index(conn):
+    """places.embedding으로 FAISS 인덱스 생성"""
     try:
         import faiss
     except ImportError:
@@ -116,40 +112,34 @@ def build_faiss_index(conn, model_name):
 
     print("FAISS 인덱스 빌드 중...")
     rows = conn.execute("""
-        SELECT e.source_id, e.place_id, e.embedding, p.name, p.district
-        FROM embeddings e
-        JOIN places p ON e.place_id = p.place_id
-        WHERE e.model_name = ?
-        ORDER BY e.source_id
-    """, (model_name,)).fetchall()
+        SELECT place_id, name, embedding
+        FROM places
+        WHERE embedding IS NOT NULL
+        ORDER BY place_id
+    """).fetchall()
 
     if not rows:
         print("임베딩 데이터 없음")
         return
 
-    source_ids = [r[0] for r in rows]
-    place_ids  = [r[1] for r in rows]
-    names      = [r[3] for r in rows]
-    districts  = [r[4] for r in rows]
-
+    place_ids = [r[0] for r in rows]
+    names = [r[1] for r in rows]
     embeddings = np.array([
         np.frombuffer(r[2], dtype=np.float32) for r in rows
     ])
 
     dim = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)   # 내적 = cosine similarity (normalized vectors)
+    index = faiss.IndexFlatIP(dim)
     index.add(embeddings)
 
     faiss.write_index(index, str(FAISS_INDEX_PATH))
 
     meta = {
-        "source_ids": source_ids,
-        "place_ids":  place_ids,
-        "names":      names,
-        "districts":  districts,
-        "model_name": model_name,
-        "dim":        dim,
-        "total":      len(rows),
+        "place_ids": place_ids,
+        "names": names,
+        "model_name": MODEL_NAME,
+        "dim": dim,
+        "total": len(rows),
     }
     with open(META_PATH, "wb") as f:
         pickle.dump(meta, f)
@@ -174,16 +164,15 @@ def search(query: str, top_k: int = 10):
     print(f"\n쿼리: '{query}' 유사 장소 Top-{top_k}")
     print("-" * 60)
     for rank, (idx, score) in enumerate(zip(idxs[0], scores[0]), 1):
-        name     = meta["names"][idx] or "(없음)"
-        district = meta["districts"][idx] or ""
-        sid      = meta["source_ids"][idx]
-        print(f"{rank:2}. [{score:.4f}] {name} ({district})  source_id={sid}")
+        name = meta["names"][idx] or "(없음)"
+        pid = meta["place_ids"][idx]
+        print(f"{rank:2}. [{score:.4f}] {name}  place_id={pid}")
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="sources 임베딩 파이프라인")
-    parser.add_argument("--search", type=str, help="검색 쿼리 (임베딩 생성 없이 검색만)")
+    parser = argparse.ArgumentParser(description="places 임베딩 파이프라인")
+    parser.add_argument("--search", type=str, help="검색 쿼리 (임베딩 없이 검색만)")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--rebuild-index", action="store_true", help="임베딩 재사용, FAISS만 재빌드")
     args = parser.parse_args()
@@ -193,13 +182,9 @@ def main():
         return
 
     conn = get_conn()
-    ensure_embeddings_table(conn)
 
     if args.rebuild_index:
-        # 모델 이름 확인
-        row = conn.execute("SELECT model_name FROM embeddings LIMIT 1").fetchone()
-        model_name = row[0] if row else MODEL_NAME
-        build_faiss_index(conn, model_name)
+        build_faiss_index(conn)
         conn.close()
         return
 
@@ -207,13 +192,13 @@ def main():
     print(f"사용 모델: {model_name}")
     print(f"임베딩 차원: {model.get_sentence_embedding_dimension()}")
 
-    rows = fetch_unembedded_sources(conn, model_name)
+    rows = fetch_unembedded(conn)
     if rows:
         embed_and_save(conn, model, model_name, rows)
     else:
-        print("새로 임베딩할 소스 없음 — FAISS 인덱스만 재빌드합니다.")
+        print("새로 임베딩할 장소 없음 — FAISS 인덱스만 재빌드합니다.")
 
-    build_faiss_index(conn, model_name)
+    build_faiss_index(conn)
     conn.close()
     print("\n완료!")
 
